@@ -109,12 +109,17 @@ jobs:
           repository: ${{ vars.TEST_SOURCE_REPO || github.repository }}
           token: ${{ vars.TEST_SOURCE_REPO != '' && secrets.SOURCE_TOKEN || github.token }}
           ref: ${{ inputs.ref || github.event.pull_request.head.sha || (vars.TEST_SOURCE_REPO != '' && 'main') || github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
+          # Only the tested commit: a full fetch prints every branch name of the source in the log.
+          fetch-depth: 1
+          persist-credentials: true
 
-      - name: Point origin/main at the PR base
-        if: github.event_name == 'pull_request'
-        run: git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+      - name: Fetch main for -Changed
+        # The history of the tested commit and origin/main (the merge base -Changed diffs against),
+        # quietly, so no ref names reach the log.
+        run: |
+          $ErrorActionPreference = 'Continue'
+          git fetch --quiet --no-tags --unshallow origin "+refs/heads/main:refs/remotes/origin/main" *> $null
+          if ($LASTEXITCODE -ne 0) { Write-Host 'Fetching main failed'; exit 1 }
 
       - uses: actions/setup-python@v5
         with:

@@ -53,9 +53,14 @@ on:
 permissions:
   contents: read
 
+# A newer PR push replaces the PR's running check. A push to main never cancels the running full
+# run: the newest main push waits in the queue (GitHub keeps one pending run per group) and runs
+# next, so every full run finishes and the latest main is always tested.
 concurrency:
   group: tests-${{ inputs.pr || github.event.pull_request.number || inputs.run_key || github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'run' }}
-  cancel-in-progress: true
+  # Only a newer push to the same PR cancels (directly, or handed to the runner with a pr input);
+  # a full run on main is never cut short by the next merge.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.pr != '' }}
 
 jobs:
   dispatch:

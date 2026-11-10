@@ -1,0 +1,256 @@
+# Tests on GitHub's Windows runners, so no test run uses Tim's PC. One file, three modes:
+#
+# - Inline (no repo variables set, the repo is public): the test job runs right here.
+# - Dispatcher (this repo is private, variable TEST_RUNNER_REPO set): a short Linux job hands each
+#   PR and main push to the public runner repo, which runs this same file. Secret RUNNER_TOKEN may
+#   start workflows there.
+# - Runner (the public runner repo, variable TEST_SOURCE_REPO set): checks out the private repo
+#   with secret SOURCE_TOKEN, prints only the suite PASS/FAIL lines, seals the full log with the
+#   public key in variable TEST_LOG_PUBLIC_KEY (tools\test_seal.ps1) and uploads only the sealed
+#   file. Only workflow_dispatch and the nightly schedule run there. Never add pull_request_target
+#   to this file: it would hand the secrets to fork PRs.
+#
+# What runs:
+# - A ready PR into main: tools\test.ps1 -Changed on the PR head, then one `orch-tests: pass|fail`
+#   comment with a `Tested: <sha>` line on the PR. The merge gate (orchestrator/orch/merge_gate.py)
+#   reads it.
+# - A push to main: the full run with -NoCache.
+# - Nightly at 01:00 UTC: the full run with -NoCache (in the runner repo once it exists).
+# - tools\test.ps1 on a PC: it pushes a test-run/<id> branch and dispatches this workflow with its
+#   switches in test_args (tools\test_cloud.ps1). tools\setup-test-runner.ps1 sets up the runner.
+#
+# PRs from forks never run: only branches in the source repo do.
+name: tests
+run-name: ${{ inputs.run_key || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      test_args:
+        description: 'tools\test.ps1 switches (empty: the full run with -NoCache)'
+        required: false
+        default: ''
+      ref:
+        description: 'Source commit or branch to test (runner mode)'
+        required: false
+        default: ''
+      pr:
+        description: 'Source PR number that gets the orch-tests comment'
+        required: false
+        default: ''
+      run_key:
+        description: 'Run name, so the caller can find this run'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ inputs.pr || github.event.pull_request.number || inputs.run_key || github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'run' }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: >-
+      vars.TEST_SOURCE_REPO == '' && vars.TEST_RUNNER_REPO != '' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Hand the run to the runner repo
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          RUNNER: ${{ vars.TEST_RUNNER_REPO }}
+          REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          ARGS: ${{ github.event_name == 'pull_request' && '-Changed' || '-NoCache' }}
+        run: |
+          key="${PR:+pr-$PR-}${REF:0:7}-${GITHUB_RUN_ID}"
+          gh workflow run tests.yml --repo "$RUNNER" -f ref="$REF" -f pr="$PR" -f test_args="$ARGS" -f run_key="$key"
+          echo "Started on $RUNNER as $key"
+
+  test:
+    if: >-
+      (vars.TEST_SOURCE_REPO != '' &&
+       (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')) ||
+      (vars.TEST_SOURCE_REPO == '' && vars.TEST_RUNNER_REPO == '' &&
+       (github.event_name != 'pull_request' ||
+        (github.event.pull_request.head.repo.full_name == github.repository &&
+         !github.event.pull_request.draft)))
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # No Linux box and no other runs here: every suite runs on this runner.
+      AUTOMATOES_ALLOW_LOCAL: '1'
+      AUTOMATOES_NO_ELEVATE: '1'
+      PYTHONUTF8: '1'
+      # Runner mode: nothing from the source may reach the public log.
+      QUIET: ${{ vars.TEST_SOURCE_REPO != '' && '1' || '' }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TEST_SOURCE_REPO || github.repository }}
+          token: ${{ vars.TEST_SOURCE_REPO != '' && secrets.SOURCE_TOKEN || github.token }}
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || (vars.TEST_SOURCE_REPO != '' && 'main') || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Point origin/main at the PR base
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: remote/agent/go.mod
+          cache-dependency-path: remote/agent/go.sum
+
+      - name: Cache the shared venvs
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Automatoes\venvs
+          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'orchestrator/requirements*.txt', 'tools/setup.ps1') }}
+          restore-keys: venvs-${{ runner.os }}-py310-
+
+      - name: AutoHotkey v2 (portable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Authenticated: the shared runner IPs hit the anonymous API rate limit.
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/AutoHotkey/AutoHotkey/releases/latest' -Headers @{ 'User-Agent' = 'automatoes-ci'; 'Authorization' = "Bearer $env:GH_TOKEN" }
+          $asset = $release.assets | Where-Object { $_.name -match '^AutoHotkey_.*\.zip$' } | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path .build\ahk | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile .build\AutoHotkey.zip -UseBasicParsing
+          Expand-Archive -LiteralPath .build\AutoHotkey.zip -DestinationPath .build\ahk -Force
+          Get-ChildItem .build\ahk -Recurse -Filter AutoHotkey64.exe | Select-Object -First 1 -ExpandProperty FullName
+
+      - name: Setup
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:QUIET) {
+            & powershell -ExecutionPolicy Bypass -File tools\setup.ps1 *> "$env:RUNNER_TEMP\setup.log"
+            $code = $LASTEXITCODE
+            Write-Host "setup exit $code (output sealed)"
+            exit $code
+          }
+          & powershell -ExecutionPolicy Bypass -File tools\setup.ps1
+          exit $LASTEXITCODE
+
+      - name: Test
+        id: test
+        env:
+          TEST_ARGS: ${{ inputs.test_args }}
+        run: |
+          # GitHub's powershell shell sets Stop, and 2>&1 turns any stderr line of the run (a
+          # faulthandler dump, a warning) into a terminating error that kills the whole run.
+          $ErrorActionPreference = 'Continue'
+          $testArgs = @('-ExecutionPolicy', 'Bypass', '-File', 'tools\test.ps1', '-Local')
+          $requested = @("$env:TEST_ARGS" -split '\s+' | Where-Object { $_ })
+          if ('${{ github.event_name }}' -eq 'pull_request') { $testArgs += '-Changed' }
+          elseif ($requested.Count -gt 0) {
+            # Sent by tools\test.ps1 (tools\test_cloud.ps1) or the dispatcher: switches and suite lists only.
+            $bad = @($requested | Where-Object { $_ -notmatch '^-?[A-Za-z][A-Za-z0-9,-]*$' })
+            if ($bad.Count) { Write-Host "Refused test_args: $($bad -join ' ')"; exit 1 }
+            $testArgs += $requested
+          }
+          else { $testArgs += '-NoCache' }
+          $log = "$env:RUNNER_TEMP\test.log"
+          if ($env:QUIET) {
+            & powershell @testArgs *> $log
+            $code = $LASTEXITCODE
+            # Only the suite lines and the total reach the public log.
+            Get-Content $log | Where-Object { $_ -match '^\s+\S+\s+(PASS|FAIL)\b' -or $_ -match '^\s+total\s' }
+          } else {
+            & powershell @testArgs 2>&1 | Tee-Object -FilePath $log
+            $code = $LASTEXITCODE
+          }
+          "code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          exit $code
+
+      - name: Report to the PR
+        if: always() && (github.event_name == 'pull_request' || inputs.pr != '') && steps.test.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ vars.TEST_SOURCE_REPO != '' && secrets.SOURCE_TOKEN || github.token }}
+          REPO: ${{ vars.TEST_SOURCE_REPO || github.repository }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha || inputs.ref }}
+          OUTCOME: ${{ steps.test.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $log = "$env:RUNNER_TEMP\test.log"
+          $lines = @()
+          if (Test-Path $log) {
+            $lines = @(Get-Content $log | Where-Object { $_ -match '^\s+\S+\s+(PASS|FAIL)\b' -or $_ -match '^\s+total\s' } | ForEach-Object { $_.Trim() })
+          }
+          $failed = @($lines | Where-Object { $_ -match '\sFAIL\b' } | ForEach-Object { ($_ -split '\s+')[0] })
+          if ($env:OUTCOME -eq 'success') {
+            $head = 'orch-tests: pass ' + (($lines | Where-Object { $_ -match '^total' }) -join ' ')
+          } else {
+            $why = if ($failed.Count) { 'failed suites: ' + ($failed -join ', ') } else { 'the run did not finish, see the log' }
+            $head = "orch-tests: fail $why"
+          }
+          $body = (@($head, '', "Tested: $env:SHA", '', '```') + $lines + @('```', '', "Log: $env:RUN_URL")) -join "`n"
+          $file = "$env:RUNNER_TEMP\comment.md"
+          [IO.File]::WriteAllText($file, $body, (New-Object Text.UTF8Encoding $false))
+          gh pr comment $env:PR --repo $env:REPO --body-file $file
+
+      - name: Seal the test reports
+        if: always() && env.QUIET == '1'
+        env:
+          LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = "$env:RUNNER_TEMP\report"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          foreach ($f in @("$env:RUNNER_TEMP\test.log", "$env:RUNNER_TEMP\setup.log")) {
+            if (Test-Path $f) { Copy-Item $f $stage }
+          }
+          if (Test-Path report\test-runs) { Copy-Item report\test-runs "$stage\test-runs" -Recurse }
+          $zip = "$env:RUNNER_TEMP\report.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\sealed" | Out-Null
+          . .\tools\test_seal.ps1
+          Protect-TestFile -InFile $zip -OutFile "$env:RUNNER_TEMP\sealed\report.sealed" -PublicKeyXml $env:LOG_PUBLIC_KEY
+          Remove-Item $zip, $stage -Recurse -Force
+
+      - name: Keep the sealed test reports
+        if: always() && env.QUIET == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/sealed/report.sealed
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Keep the test reports
+        if: always() && env.QUIET != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ github.run_id }}
+          path: |
+            report/test-runs/*.md
+            report/test-runs/junit/
+            ${{ runner.temp }}/test.log
+          retention-days: 14
+          if-no-files-found: ignore

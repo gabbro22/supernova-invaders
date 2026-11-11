@@ -1,0 +1,191 @@
+# Builds the app on GitHub's Windows runners, one job per tier (docs/DESIGN.md, Build tiers). One
+# file, three modes, the same as tests.yml:
+#
+# - Inline (no repo variables set, the repo is public): builds run right here, after every push to
+#   main (Dev only) and by hand. The EXE and installer are kept as plain run artifacts.
+# - Private source (variable TEST_RUNNER_REPO set): no job runs here, so no build needs the private
+#   repo's billed Actions minutes. tools\build-cloud.ps1 starts builds on the public runner repo.
+# - Runner (the public runner repo, variable TEST_SOURCE_REPO set): checks out the private repo with
+#   secret SOURCE_TOKEN, prints only a done line per tier, and seals the EXE, the installer and the
+#   build log with the public key in variable TEST_LOG_PUBLIC_KEY (tools\test_seal.ps1), so nothing
+#   from the source and no build is readable there. Only workflow_dispatch runs there.
+#
+# tools\setup-test-runner.ps1 copies this file to the runner repo next to tests.yml. Releases still
+# go through tools\publish-release.ps1 (docs/RELEASING.md).
+name: build
+run-name: ${{ inputs.run_key || github.event.head_commit.message || github.workflow }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: 'Comma list of tiers: stable, beta, alpha, dev'
+        required: false
+        default: 'stable,beta,alpha,dev'
+      ref:
+        description: 'Source commit or branch to build (runner mode)'
+        required: false
+        default: ''
+      run_key:
+        description: 'Run name, so the caller can find this run'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# A build that started finishes; the newest push waits for it instead of cancelling it.
+concurrency:
+  group: build-${{ inputs.run_key || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: >-
+      (vars.TEST_SOURCE_REPO != '' && github.event_name == 'workflow_dispatch') ||
+      (vars.TEST_SOURCE_REPO == '' && vars.TEST_RUNNER_REPO == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tiers: ${{ steps.plan.outputs.tiers }}
+    steps:
+      - name: Plan
+        id: plan
+        shell: pwsh
+        env:
+          TIERS: ${{ github.event_name == 'push' && 'dev' || inputs.tiers }}
+        run: |
+          $tiers = @("$env:TIERS" -split '[,\s]+' | Where-Object { $_ } | ForEach-Object { $_.ToLower() } | Select-Object -Unique)
+          if (-not $tiers.Count) { $tiers = @('stable', 'beta', 'alpha', 'dev') }
+          $bad = @($tiers | Where-Object { $_ -notin @('stable', 'beta', 'alpha', 'dev') })
+          if ($bad.Count) { Write-Host "Refused tiers: $($bad -join ' ')"; exit 1 }
+          Write-Host "Tiers: $($tiers -join ', ')"
+          "tiers=$(ConvertTo-Json -InputObject @($tiers) -Compress)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  exe:
+    needs: plan
+    name: build (${{ matrix.tier }})
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJSON(needs.plan.outputs.tiers) }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: powershell
+    env:
+      PYTHONUTF8: '1'
+      AUTOMATOES_NO_ELEVATE: '1'
+      # Runner mode: nothing from the source may reach the public log.
+      QUIET: ${{ vars.TEST_SOURCE_REPO != '' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TEST_SOURCE_REPO || github.repository }}
+          token: ${{ vars.TEST_SOURCE_REPO != '' && secrets.SOURCE_TOKEN || github.token }}
+          ref: ${{ inputs.ref || (vars.TEST_SOURCE_REPO != '' && 'main') || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Cache Python
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/Python/3.10.11
+          key: python-${{ runner.os }}-3.10.11
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10.11'
+
+      - name: Cache the shared venvs
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Automatoes\venvs
+          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'orchestrator/requirements*.txt', 'tools/setup.ps1') }}
+          restore-keys: venvs-${{ runner.os }}-py310-
+
+      - name: Inno Setup
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
+          if ($iscc) { Write-Host 'Inno Setup: on the image'; exit 0 }
+          choco install innosetup --no-progress -y *> "$env:RUNNER_TEMP\inno.log"
+          Write-Host "Inno Setup: installed (exit $LASTEXITCODE)"
+          exit $LASTEXITCODE
+
+      - name: Setup
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:QUIET) {
+            & powershell -ExecutionPolicy Bypass -File tools\setup.ps1 *> "$env:RUNNER_TEMP\setup.log"
+            $code = $LASTEXITCODE
+            Write-Host "setup exit $code (output sealed)"
+            exit $code
+          }
+          & powershell -ExecutionPolicy Bypass -File tools\setup.ps1
+          exit $LASTEXITCODE
+
+      - name: Build
+        env:
+          # Lifts the API limit the runner IPs share for the AutoHotkey downloads.
+          GH_TOKEN: ${{ github.token }}
+          TIER: ${{ matrix.tier }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', 'tools\build-local-exe.ps1', '-Tier', $env:TIER)
+          # Dev carries the AutoHotkey engine too, as a -test build does.
+          if ($env:TIER -eq 'dev') { $buildArgs += '-WithAhk' }
+          $log = "$env:RUNNER_TEMP\build.log"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          if ($env:QUIET) {
+            & powershell @buildArgs *> $log
+          } else {
+            & powershell @buildArgs 2>&1 | Tee-Object -FilePath $log
+          }
+          $code = $LASTEXITCODE
+          $state = if ($code -eq 0 -and (Test-Path dist\Automatoes.exe)) { 'PASS' } else { 'FAIL' }
+          Write-Host ('  {0,-7} {1} {2,7:N0}s' -f $env:TIER, $state, $clock.Elapsed.TotalSeconds)
+          if ($state -eq 'FAIL') { exit 1 }
+
+      - name: Seal the build
+        if: always() && env.QUIET == '1'
+        env:
+          LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+          TIER: ${{ matrix.tier }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = "$env:RUNNER_TEMP\stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          foreach ($f in @('dist\Automatoes.exe', 'dist\Automatoes-Setup.exe', "$env:RUNNER_TEMP\build.log", "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\inno.log")) {
+            if (Test-Path $f) { Copy-Item $f $stage }
+          }
+          $zip = "$env:RUNNER_TEMP\build.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Fastest -Force
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\sealed" | Out-Null
+          . .\tools\test_seal.ps1
+          Protect-TestFile -InFile $zip -OutFile "$env:RUNNER_TEMP\sealed\build-$env:TIER.sealed" -PublicKeyXml $env:LOG_PUBLIC_KEY
+          Remove-Item $zip, $stage -Recurse -Force
+
+      - name: Keep the sealed build
+        if: always() && env.QUIET == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.tier }}
+          path: ${{ runner.temp }}/sealed/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: ignore
+
+      - name: Keep the build
+        if: env.QUIET != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Automatoes-${{ matrix.tier }}-${{ github.sha }}
+          path: |
+            dist/Automatoes.exe
+            dist/Automatoes-Setup.exe
+          retention-days: 14
+          if-no-files-found: error

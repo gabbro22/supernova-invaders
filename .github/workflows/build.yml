@@ -2,12 +2,12 @@
 # file, three modes, the same as tests.yml:
 #
 # - Inline (no repo variables set, the repo is public): builds run right here, after every push to
-#   main (Dev only) and by hand. The EXE and installer are kept as plain run artifacts.
+#   main (Dev only) and by hand. The installer is kept as a plain run artifact.
 # - Private source (variable TEST_RUNNER_REPO set): no job runs here, so no build needs the private
 #   repo's billed Actions minutes. tools\build-cloud.ps1 starts builds on the public runner repo.
 # - Runner (the public runner repo, variable TEST_SOURCE_REPO set): checks out the private repo with
-#   secret SOURCE_TOKEN, prints only a done line per tier, and seals the EXE, the installer and the
-#   build log with the public key in variable TEST_LOG_PUBLIC_KEY (tools\test_seal.ps1), so nothing
+#   secret SOURCE_TOKEN, prints only a done line per tier, and seals the installer and the build
+#   log with the public key in variable TEST_LOG_PUBLIC_KEY (tools\test_seal.ps1), so nothing
 #   from the source and no build is readable there. Only workflow_dispatch runs there.
 #
 # tools\setup-test-runner.ps1 copies this file to the runner repo next to tests.yml. Releases still
@@ -146,7 +146,8 @@ jobs:
             & powershell @buildArgs 2>&1 | Tee-Object -FilePath $log
           }
           $code = $LASTEXITCODE
-          $state = if ($code -eq 0 -and (Test-Path dist\Automatoes.exe)) { 'PASS' } else { 'FAIL' }
+          # The installer is the build: the app itself is a folder (dist\Automatoes) inside it.
+          $state = if ($code -eq 0 -and (Test-Path dist\Automatoes-Setup.exe)) { 'PASS' } else { 'FAIL' }
           Write-Host ('  {0,-7} {1} {2,7:N0}s' -f $env:TIER, $state, $clock.Elapsed.TotalSeconds)
           if ($state -eq 'FAIL') { exit 1 }
 
@@ -159,7 +160,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $stage = "$env:RUNNER_TEMP\stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          foreach ($f in @('dist\Automatoes.exe', 'dist\Automatoes-Setup.exe', "$env:RUNNER_TEMP\build.log", "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\inno.log")) {
+          foreach ($f in @('dist\Automatoes-Setup.exe', "$env:RUNNER_TEMP\build.log", "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\inno.log")) {
             if (Test-Path $f) { Copy-Item $f $stage }
           }
           $zip = "$env:RUNNER_TEMP\build.zip"
@@ -184,8 +185,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Automatoes-${{ matrix.tier }}-${{ github.sha }}
-          path: |
-            dist/Automatoes.exe
-            dist/Automatoes-Setup.exe
+          path: dist/Automatoes-Setup.exe
           retention-days: 14
           if-no-files-found: error

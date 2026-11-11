@@ -1,9 +1,10 @@
 # Tests on GitHub's Windows runners, so no test run uses Tim's PC. One file, three modes:
 #
 # - Inline (no repo variables set, the repo is public): the test job runs right here.
-# - Dispatcher (this repo is private, variable TEST_RUNNER_REPO set): a short Linux job hands each
-#   PR and main push to the public runner repo, which runs this same file. Secret RUNNER_TOKEN may
-#   start workflows there.
+# - Private source (variable TEST_RUNNER_REPO set): no job runs here, so no PR check needs the
+#   private repo's billed Actions minutes. tools\test-dispatch.ps1 (a scheduled task on the PC,
+#   orchestrator/orch/test_dispatch.py) starts each PR head and main push on the public runner
+#   repo, which runs this same file. A tools\test.ps1 run of a PR head reports to that PR itself.
 # - Runner (the public runner repo, variable TEST_SOURCE_REPO set): checks out the private repo
 #   with secret SOURCE_TOKEN, prints only the suite PASS/FAIL lines, seals the full log with the
 #   public key in variable TEST_LOG_PUBLIC_KEY (tools\test_seal.ps1) and uploads only the sealed
@@ -67,28 +68,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.pr != '' }}
 
 jobs:
-  dispatch:
-    if: >-
-      vars.TEST_SOURCE_REPO == '' && vars.TEST_RUNNER_REPO != '' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft))
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Hand the run to the runner repo
-        env:
-          GH_TOKEN: ${{ secrets.RUNNER_TOKEN }}
-          RUNNER: ${{ vars.TEST_RUNNER_REPO }}
-          REF: ${{ github.event.pull_request.head.sha || github.sha }}
-          PR: ${{ github.event.pull_request.number }}
-          ARGS: ${{ github.event_name == 'pull_request' && '-Changed' || '-NoCache' }}
-        run: |
-          key="${PR:+pr-$PR-}${REF:0:7}-${GITHUB_RUN_ID}"
-          gh workflow run tests.yml --repo "$RUNNER" -f ref="$REF" -f pr="$PR" -f test_args="$ARGS" -f run_key="$key"
-          echo "Started on $RUNNER as $key"
-
   plan:
     if: >-
       (vars.TEST_SOURCE_REPO != '' &&
@@ -137,7 +116,7 @@ jobs:
           $requested = @("$env:TEST_ARGS" -split '\s+' | Where-Object { $_ })
           if ('${{ github.event_name }}' -eq 'pull_request') { $runArgs = @('-Changed') }
           elseif ($requested.Count -gt 0) {
-            # Sent by tools\test.ps1 (tools\test_cloud.ps1) or the dispatcher: switches and suite lists only.
+            # Sent by tools\test.ps1 (tools\test_cloud.ps1) or tools\test-dispatch.ps1: switches and suite lists only.
             $bad = @($requested | Where-Object { $_ -notmatch '^-?[A-Za-z][A-Za-z0-9,-]*$' })
             if ($bad.Count) { Write-Host "Refused test_args: $($bad -join ' ')"; exit 1 }
             $runArgs = $requested

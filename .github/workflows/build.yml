@@ -28,6 +28,10 @@ on:
         description: 'Source commit or branch to build (runner mode)'
         required: false
         default: ''
+      build_label:
+        description: 'Release tag baked into the build, such as v0.4.16-alpha.5 (empty: none)'
+        required: false
+        default: ''
       run_key:
         description: 'Run name, so the caller can find this run'
         required: false
@@ -133,11 +137,17 @@ jobs:
           # Lifts the API limit the runner IPs share for the AutoHotkey downloads.
           GH_TOKEN: ${{ github.token }}
           TIER: ${{ matrix.tier }}
+          BUILD_LABEL: ${{ inputs.build_label }}
         run: |
           $ErrorActionPreference = 'Continue'
           $buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', 'tools\build-local-exe.ps1', '-Tier', $env:TIER)
-          # Dev carries the AutoHotkey engine too, as a -test build does.
+          # Only Dev carries the AutoHotkey engine: its switch is in the Dev section.
           if ($env:TIER -eq 'dev') { $buildArgs += '-WithAhk' }
+          # A published build carries its release tag, which the top bar and the updater read.
+          if ($env:BUILD_LABEL) {
+            if ($env:BUILD_LABEL -notmatch '^v\d+\.\d+\.\d+(-(test|beta|alpha)\.\d+)?$') { Write-Host 'Refused build_label'; exit 1 }
+            $buildArgs += @('-BuildLabel', $env:BUILD_LABEL)
+          }
           $log = "$env:RUNNER_TEMP\build.log"
           $clock = [Diagnostics.Stopwatch]::StartNew()
           if ($env:QUIET) {

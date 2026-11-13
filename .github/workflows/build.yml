@@ -138,6 +138,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TIER: ${{ matrix.tier }}
           BUILD_LABEL: ${{ inputs.build_label }}
+          # Alpha and Dev builds carry it so testers can send reports (tools\setup-test-runner.ps1 sets it).
+          AUTOMATOES_REPORT_WEBHOOK: ${{ secrets.REPORT_WEBHOOK }}
         run: |
           $ErrorActionPreference = 'Continue'
           $buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', 'tools\build-local-exe.ps1', '-Tier', $env:TIER)

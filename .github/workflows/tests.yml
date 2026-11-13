@@ -364,8 +364,9 @@ jobs:
           $ok = $env:PLAN -eq 'success' -and $failed.Count -eq 0
           "ok=$($ok.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # A run a newer push cancelled says nothing: its "no result" lines are not a failure.
       - name: Report to the PR
-        if: always() && (github.event_name == 'pull_request' || inputs.pr != '')
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || inputs.pr != '') }}
         env:
           GH_TOKEN: ${{ vars.TEST_SOURCE_REPO != '' && secrets.SOURCE_TOKEN || github.token }}
           REPO: ${{ vars.TEST_SOURCE_REPO || github.repository }}

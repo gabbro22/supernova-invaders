@@ -134,7 +134,7 @@ jobs:
 
       - name: Build
         env:
-          # Lifts the API limit the runner IPs share for the AutoHotkey downloads.
+          # Lifts the API limit the runner IPs share.
           GH_TOKEN: ${{ github.token }}
           TIER: ${{ matrix.tier }}
           BUILD_LABEL: ${{ inputs.build_label }}
@@ -143,8 +143,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', 'tools\build-local-exe.ps1', '-Tier', $env:TIER)
-          # Only Dev carries the AutoHotkey engine: its switch is in the Dev section.
-          if ($env:TIER -eq 'dev') { $buildArgs += '-WithAhk' }
           # A published build carries its release tag, which the top bar and the updater read.
           if ($env:BUILD_LABEL) {
             if ($env:BUILD_LABEL -notmatch '^v\d+\.\d+\.\d+(-(test|beta|alpha)\.\d+)?$') { Write-Host 'Refused build_label'; exit 1 }

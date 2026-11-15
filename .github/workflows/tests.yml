@@ -198,23 +198,6 @@ jobs:
           key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'orchestrator/requirements*.txt', 'tools/setup.ps1') }}
           restore-keys: venvs-${{ runner.os }}-py310-
 
-      # A pinned AutoHotkey, cached: no release lookup against the API limit the runner IPs share.
-      - name: Cache AutoHotkey
-        id: ahk-cache
-        uses: actions/cache@v4
-        with:
-          path: .build/ahk
-          key: ahk-v2.0.31
-
-      - name: AutoHotkey v2 (portable)
-        if: steps.ahk-cache.outputs.cache-hit != 'true'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path .build\ahk | Out-Null
-          Invoke-WebRequest -Uri 'https://github.com/AutoHotkey/AutoHotkey/releases/download/v2.0.31/AutoHotkey_2.0.31.zip' -OutFile .build\AutoHotkey.zip -UseBasicParsing
-          Expand-Archive -LiteralPath .build\AutoHotkey.zip -DestinationPath .build\ahk -Force
-          Get-ChildItem .build\ahk -Recurse -Filter AutoHotkey64.exe | Select-Object -First 1 -ExpandProperty FullName
-
       - name: Setup
         run: |
           $ErrorActionPreference = 'Continue'

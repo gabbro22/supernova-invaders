@@ -11,7 +11,7 @@
 #   from the source and no build is readable there. Only workflow_dispatch runs there.
 #
 # tools\setup-test-runner.ps1 copies this file to the runner repo next to tests.yml. Releases still
-# go through tools\publish-release.ps1 (docs/RELEASING.md).
+# go through tools\publish.ps1 (docs/RELEASING.md).
 name: build
 run-name: ${{ inputs.run_key || github.event.head_commit.message || github.workflow }}
 
@@ -108,7 +108,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\Automatoes\venvs
-          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'orchestrator/requirements*.txt', 'tools/setup.ps1') }}
+          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'tools/setup.ps1') }}
           restore-keys: venvs-${{ runner.os }}-py310-
 
       - name: Inno Setup
@@ -168,7 +168,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $stage = "$env:RUNNER_TEMP\stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          foreach ($f in @(Get-ChildItem dist\Automatoes*-Setup*.exe -ErrorAction SilentlyContinue | ForEach-Object FullName) + @("$env:RUNNER_TEMP\build.log", "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\inno.log")) {
+          # The installer is the build, and the install manifest names every file inside it
+          # (tools\install_manifest.ps1). tools\build-cloud.ps1 unpacks both, so a cloud build
+          # publishes a signed manifest like a local one.
+          foreach ($f in @(Get-ChildItem dist\Automatoes*-Setup*.exe -ErrorAction SilentlyContinue | ForEach-Object FullName) + @("$env:GITHUB_WORKSPACE\dist\Automatoes\manifest.txt", "$env:RUNNER_TEMP\build.log", "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\inno.log")) {
             if (Test-Path $f) { Copy-Item $f $stage }
           }
           $zip = "$env:RUNNER_TEMP\build.zip"

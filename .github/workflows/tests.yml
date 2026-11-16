@@ -2,8 +2,7 @@
 #
 # - Inline (no repo variables set, the repo is public): the test job runs right here.
 # - Private source (variable TEST_RUNNER_REPO set): no job runs here, so no PR check needs the
-#   private repo's billed Actions minutes. tools\test-dispatch.ps1 (a scheduled task on the PC,
-#   orchestrator/orch/test_dispatch.py) starts each PR head and main push on the public runner
+#   private repo's billed Actions minutes. tools\test.ps1 starts each run on the public runner
 #   repo, which runs this same file. A tools\test.ps1 run of a PR head reports to that PR itself.
 # - Runner (the public runner repo, variable TEST_SOURCE_REPO set): checks out the private repo
 #   with secret SOURCE_TOKEN, prints only the suite PASS/FAIL lines, seals the full log with the
@@ -17,8 +16,7 @@
 #
 # What runs:
 # - A ready PR into main: tools\test.ps1 -Changed on the PR head, then one `orch-tests: pass|fail`
-#   comment with a `Tested: <sha>` line on the PR. The merge gate (orchestrator/orch/merge_gate.py)
-#   reads it.
+#   comment with a `Tested: <sha>` line on the PR.
 # - A push to main: the full run with -NoCache.
 # - Nightly at 01:00 UTC: the full run with -NoCache (in the runner repo once it exists).
 # - tools\test.ps1 on a PC: it pushes a test-run/<id> branch and dispatches this workflow with its
@@ -116,7 +114,7 @@ jobs:
           $requested = @("$env:TEST_ARGS" -split '\s+' | Where-Object { $_ })
           if ('${{ github.event_name }}' -eq 'pull_request') { $runArgs = @('-Changed') }
           elseif ($requested.Count -gt 0) {
-            # Sent by tools\test.ps1 (tools\test_cloud.ps1) or tools\test-dispatch.ps1: switches and suite lists only.
+            # Sent by tools\test.ps1 (tools\test_cloud.ps1): switches and suite lists only.
             $bad = @($requested | Where-Object { $_ -notmatch '^-?[A-Za-z][A-Za-z0-9,-]*$' })
             if ($bad.Count) { Write-Host "Refused test_args: $($bad -join ' ')"; exit 1 }
             $runArgs = $requested
@@ -195,7 +193,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\Automatoes\venvs
-          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'orchestrator/requirements*.txt', 'tools/setup.ps1') }}
+          key: venvs-${{ runner.os }}-py310-${{ hashFiles('gui/pyproject.toml', 'ocr/pyproject.toml', 'tools/setup.ps1') }}
           restore-keys: venvs-${{ runner.os }}-py310-
 
       - name: Setup

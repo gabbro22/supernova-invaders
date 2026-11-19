@@ -75,18 +75,18 @@ jobs:
           print("uri written")
           '@ | Set-Content join.py
           python join.py
-          foreach ($k in 'Registry::HKEY_CLASSES_ROOToblox-player\shell\open\command','HKCU:\Software\Classesoblox-player\shell\open\command','HKLM:\Software\Classesoblox-player\shell\open\command') {
+          foreach ($k in 'Registry::HKEY_CLASSES_ROOT\roblox-player\shell\open\command','HKCU:\Software\Classes\roblox-player\shell\open\command','HKLM:\Software\Classes\roblox-player\shell\open\command') {
             if (Test-Path $k) { "$k => " + (Get-ItemProperty $k).'(default)' } else { "$k missing" }
           }
           $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           "exe: $exe"
-          $uri = Get-Content uri.txt -Raw
-          $p = Start-Process $exe -ArgumentList $uri.Trim() -PassThru
+          $uri = (Get-Content uri.txt -Raw).Trim()
+          $p = Start-Process $exe -ArgumentList $uri -PassThru
           Start-Sleep 20
           if ($p.HasExited) { "player exited with $($p.ExitCode)" } else { "player still running" }
           Get-Process | Where-Object { $_.Name -like '*Roblox*' } | ForEach-Object { "  proc $($_.Name) $($_.Id)" }
           Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { "event: " + $_.Message.Substring(0,[Math]::Min(300,$_.Message.Length)) }
-          Get-ChildItem "$env:LOCALAPPDATA\Roblox", "$env:ProgramData\Roblox", "${env:ProgramFiles}\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 6 | ForEach-Object { "log: $($_.FullName) $($_.Length)" }
+          Get-ChildItem "$env:LOCALAPPDATA\Roblox", "$env:ProgramData\Roblox", "$env:ProgramFiles\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 6 | ForEach-Object { "log: $($_.FullName) $($_.Length)" }
       - name: Watch 10 minutes
         shell: pwsh
         run: |
@@ -103,7 +103,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $log = Get-ChildItem "$env:LOCALAPPDATA\Roblox", "${env:ProgramFiles}\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Player' } | Sort-Object LastWriteTime | Select-Object -Last 1
+          $log = Get-ChildItem "$env:LOCALAPPDATA\Roblox", "$env:ProgramFiles\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Player' } | Sort-Object LastWriteTime | Select-Object -Last 1
           "player log: $($log.FullName)"
           if (-not $log) { 'no player log'; exit 0 }
           Select-String $log.FullName -Pattern 'graphics|d3d|direct3d|render|fps|hyperion|virtual|joined|joining|disconnect|kick|error|crash' |

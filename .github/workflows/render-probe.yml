@@ -71,15 +71,27 @@ jobs:
           launcher = quote(f"https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={place}&isPlayTogetherGame=false", safe="")
           uri = ("roblox-player:1+launchmode:play+gameinfo:" + t + f"+launchtime:{time.time_ns()//1000000}+placelauncherurl:" + launcher
                  + "+browsertrackerid:0+robloxLocale:en_us+gameLocale:en_us")
-          os.startfile(uri)
-          print("launched")
+          open("uri.txt","w").write(uri)
+          print("uri written")
           '@ | Set-Content join.py
           python join.py
+          foreach ($k in 'Registry::HKEY_CLASSES_ROOToblox-player\shell\open\command','HKCU:\Software\Classesoblox-player\shell\open\command','HKLM:\Software\Classesoblox-player\shell\open\command') {
+            if (Test-Path $k) { "$k => " + (Get-ItemProperty $k).'(default)' } else { "$k missing" }
+          }
+          $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          "exe: $exe"
+          $uri = Get-Content uri.txt -Raw
+          $p = Start-Process $exe -ArgumentList $uri.Trim() -PassThru
+          Start-Sleep 20
+          if ($p.HasExited) { "player exited with $($p.ExitCode)" } else { "player still running" }
+          Get-Process | Where-Object { $_.Name -like '*Roblox*' } | ForEach-Object { "  proc $($_.Name) $($_.Id)" }
+          Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { "event: " + $_.Message.Substring(0,[Math]::Min(300,$_.Message.Length)) }
+          Get-ChildItem "$env:LOCALAPPDATA\Roblox", "$env:ProgramData\Roblox", "${env:ProgramFiles}\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 6 | ForEach-Object { "log: $($_.FullName) $($_.Length)" }
       - name: Watch 10 minutes
         shell: pwsh
         run: |
           $cores = [Environment]::ProcessorCount
-          foreach ($i in 1..20) {
+          foreach ($i in 1..8) {
             Start-Sleep 30
             ./shot.ps1 ("shots/2-run-{0:d2}.png" -f $i)
             $cpu = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
@@ -91,7 +103,8 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $log = Get-ChildItem "$env:LOCALAPPDATA\Roblox\logs\*Player*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          $log = Get-ChildItem "$env:LOCALAPPDATA\Roblox", "${env:ProgramFiles}\Roblox" -Recurse -Filter *.log -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Player' } | Sort-Object LastWriteTime | Select-Object -Last 1
+          "player log: $($log.FullName)"
           if (-not $log) { 'no player log'; exit 0 }
           Select-String $log.FullName -Pattern 'graphics|d3d|direct3d|render|fps|hyperion|virtual|joined|joining|disconnect|kick|error|crash' |
             Where-Object { $_.Line -notmatch 'ticket|gameinfo|ROBLOSECURITY|cookie' } | Select-Object -First 60 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }

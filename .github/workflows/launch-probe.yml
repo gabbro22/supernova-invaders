@@ -1,0 +1,91 @@
+name: launch-probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Machine
+        shell: pwsh
+        run: |
+          "os: " + [System.Environment]::OSVersion.VersionString
+          Get-CimInstance Win32_OperatingSystem | ForEach-Object { "caption: $($_.Caption) build: $($_.BuildNumber) ram: $([int]($_.TotalVisibleMemorySize/1024))MB" }
+          "cpus: " + (Get-CimInstance Win32_Processor).NumberOfLogicalProcessors
+          Get-CimInstance Win32_VideoController | ForEach-Object { "video: $($_.Name) driver: $($_.DriverVersion) mode: $($_.VideoModeDescription)" }
+
+      - name: Shot helper
+        shell: pwsh
+        run: |
+          @'
+          param($Path)
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+          $dir = Split-Path $Path
+          if ($dir) { New-Item -ItemType Directory -Force $dir | Out-Null }
+          $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+          "shot $Path $($b.Width)x$($b.Height)"
+          '@ | Set-Content shot.ps1
+
+      - name: Install
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://www.roblox.com/download/client?os=win' -OutFile inst.exe -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          "installer bytes: " + (Get-Item inst.exe).Length
+          Start-Process inst.exe
+          $deadline = (Get-Date).AddMinutes(4)
+          do {
+            $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            if ($exe) { break }
+            Start-Sleep 10
+          } while ((Get-Date) -lt $deadline)
+          "exe: $exe"
+          Start-Sleep 20
+          ./shot.ps1 shots/1-after-install.png
+
+      - name: Plain start
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $p = Start-Process $exe -PassThru
+          Start-Sleep 45
+          if ($p.HasExited) { "A: exited code $($p.ExitCode)" } else { "A: alive pid $($p.Id)" }
+          Get-Process | Where-Object { $_.Name -like '*Roblox*' } | ForEach-Object { "proc $($_.Name) $($_.Id) window='$($_.MainWindowTitle)' mem=$([int]($_.WS/1MB))MB" }
+          ./shot.ps1 shots/2-plain.png
+
+      - name: Dead ticket start
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $uri = "roblox-player:1+launchmode:play+gameinfo:" + ("0" * 32) + "+launchtime:1700000000000+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestGame%26placeId%3D8304191830%26isPlayTogetherGame%3Dfalse+browsertrackerid:0+robloxLocale:en_us+gameLocale:en_us"
+          $p = Start-Process $exe -ArgumentList $uri -PassThru
+          Start-Sleep 45
+          if ($p.HasExited) { "B: exited code $($p.ExitCode)" } else { "B: alive pid $($p.Id)" }
+          Get-Process | Where-Object { $_.Name -like '*Roblox*' } | ForEach-Object { "proc $($_.Name) $($_.Id) window='$($_.MainWindowTitle)' mem=$([int]($_.WS/1MB))MB" }
+          ./shot.ps1 shots/3-dead-ticket.png
+
+      - name: What it wrote
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Select-Object -First 8 | ForEach-Object {
+            if ($_.Message) { "event: $($_.ProviderName): " + $_.Message.Substring(0, [Math]::Min(400, $_.Message.Length)).Replace("`r"," ").Replace("`n"," ") }
+          }
+          $logs = Get-ChildItem "$env:LOCALAPPDATA\Roblox\logs", "$env:ProgramFiles\Roblox\logs" -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 6
+          foreach ($l in $logs) { "log: $($l.FullName) $($l.Length)" }
+          $newest = $logs | Select-Object -Last 1
+          if ($newest) {
+            Select-String -Path $newest.FullName -Pattern 'graphics|d3d|direct3d|render|fps|virtual|error|crash|whitelist' -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }
+          } else { "no player log" }
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shots
+          path: shots
+          if-no-files-found: warn

@@ -3,7 +3,7 @@ on: workflow_dispatch
 jobs:
   probe:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Shot helper
         shell: pwsh
@@ -43,19 +43,58 @@ jobs:
           ./shot.ps1 shots/1-after-install.png
           (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue) | Select-Object FullName
           Get-Process | Where-Object { $_.Name -like 'Roblox*' } | Format-Table Name, Id, WS, MainWindowTitle
-      - name: Launch
+      - name: Join lobby
         shell: pwsh
+        env:
+          COOKIE: ${{ secrets.PROBE_ACCOUNT_COOKIE }}
+          PLACE: '8304191830'
         run: |
           Get-Process | Where-Object { $_.Name -like 'Roblox*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-          $exe = ((Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue) | Select-Object -First 1).FullName
-          "exe: $exe"
-          Start-Process $exe
-          foreach ($i in 1..6) {
-            Start-Sleep 15
-            ./shot.ps1 "shots/2-launch-$i.png"
-            Get-Process | Where-Object { $_.Name -like 'Roblox*' } | Format-Table Name, Id, @{n='MB';e={[int]($_.WS/1MB)}}, CPU, MainWindowTitle
+          @'
+          import os, time, urllib.request, urllib.error
+          from urllib.parse import quote
+          ck = os.environ["COOKIE"].strip()
+          def post(csrf):
+              h = {"Cookie": ".ROBLOSECURITY=" + ck, "Referer": "https://www.roblox.com/", "Origin": "https://www.roblox.com",
+                   "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+              if csrf: h["X-CSRF-TOKEN"] = csrf
+              r = urllib.request.Request("https://auth.roblox.com/v1/authentication-ticket", data=b"{}", headers=h, method="POST")
+              try:
+                  with urllib.request.urlopen(r, timeout=20) as a: return a.status, a.headers
+              except urllib.error.HTTPError as e: return e.code, e.headers
+          st, hd = post("")
+          if st == 403 and hd.get("x-csrf-token"): st, hd = post(hd["x-csrf-token"])
+          t = hd.get("rbx-authentication-ticket") or ""
+          print("ticket status", st, "got ticket" if t else "NO TICKET")
+          if not t: raise SystemExit(1)
+          place = os.environ["PLACE"]
+          launcher = quote(f"https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={place}&isPlayTogetherGame=false", safe="")
+          uri = ("roblox-player:1+launchmode:play+gameinfo:" + t + f"+launchtime:{time.time_ns()//1000000}+placelauncherurl:" + launcher
+                 + "+browsertrackerid:0+robloxLocale:en_us+gameLocale:en_us")
+          os.startfile(uri)
+          print("launched")
+          '@ | Set-Content join.py
+          python join.py
+      - name: Watch 10 minutes
+        shell: pwsh
+        run: |
+          $cores = [Environment]::ProcessorCount
+          foreach ($i in 1..20) {
+            Start-Sleep 30
+            ./shot.ps1 ("shots/2-run-{0:d2}.png" -f $i)
+            $cpu = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
+            $free = [int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)
+            "t=$($i*30)s machine cpu=$cpu% free=${free}MB"
+            Get-Process | Where-Object { $_.Name -like 'Roblox*' } | ForEach-Object { "  $($_.Name) mem=$([int]($_.WS/1MB))MB cpu_s=$([int]$_.CPU) title='$($_.MainWindowTitle)'" }
           }
-          Get-ChildItem "$env:LOCALAPPDATA\Roblox\logs" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 3 | ForEach-Object { Copy-Item $_.FullName shots/ }
+      - name: Game log lines
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Get-ChildItem "$env:LOCALAPPDATA\Roblox\logs\*Player*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $log) { 'no player log'; exit 0 }
+          Select-String $log.FullName -Pattern 'graphics|d3d|direct3d|render|fps|hyperion|virtual|joined|joining|disconnect|kick|error|crash' |
+            Where-Object { $_.Line -notmatch 'ticket|gameinfo|ROBLOSECURITY|cookie' } | Select-Object -First 60 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

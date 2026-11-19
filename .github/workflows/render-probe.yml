@@ -38,16 +38,17 @@ jobs:
           (Get-Item inst.exe).Length
           $p = Start-Process inst.exe -PassThru
           $t = 0
-          while (-not (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions\*\RobloxPlayerBeta.exe" -ErrorAction SilentlyContinue) -and $t -lt 240) { Start-Sleep 5; $t += 5 }
+          while (-not (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue) -and $t -lt 180) { Start-Sleep 5; $t += 5 }
           Start-Sleep 20
           ./shot.ps1 shots/1-after-install.png
-          Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe | Select-Object FullName
+          (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue) | Select-Object FullName
           Get-Process | Where-Object { $_.Name -like 'Roblox*' } | Format-Table Name, Id, WS, MainWindowTitle
       - name: Launch
         shell: pwsh
         run: |
           Get-Process | Where-Object { $_.Name -like 'Roblox*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-          $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe | Select-Object -First 1).FullName
+          $exe = ((Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue) | Select-Object -First 1).FullName
+          "exe: $exe"
           Start-Process $exe
           foreach ($i in 1..6) {
             Start-Sleep 15

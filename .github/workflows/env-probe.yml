@@ -1,0 +1,62 @@
+name: env-probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-2022, windows-latest]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 20
+    steps:
+      - name: Machine
+        shell: pwsh
+        run: |
+          "image: ${{ matrix.image }}"
+          (Get-CimInstance Win32_OperatingSystem).Caption
+          "build: " + (Get-CimInstance Win32_OperatingSystem).BuildNumber
+          "hypervisor present: " + (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
+          Get-CimInstance Win32_VideoController | ForEach-Object { "video: $($_.Name) mode: $($_.VideoModeDescription)" }
+          bcdedit /enum "{current}" | Select-String 'testsigning|nointegritychecks|hypervisorlaunchtype|integrityservices'
+
+      - name: Install
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://www.roblox.com/download/client?os=win' -OutFile inst.exe -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          Start-Process inst.exe
+          $deadline = (Get-Date).AddMinutes(4)
+          do {
+            $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            if ($exe) { break }
+            Start-Sleep 10
+          } while ((Get-Date) -lt $deadline)
+          "exe: $exe"
+          Start-Sleep 20
+
+      - name: Launch
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem "$env:LOCALAPPDATA\Roblox\Versions", "${env:ProgramFiles(x86)}\Roblox\Versions", "$env:ProgramFiles\Roblox\Versions" -Recurse -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          $p = Start-Process $exe -PassThru
+          Start-Sleep 40
+          if ($p.HasExited) { "plain: exited code $($p.ExitCode)" } else { "plain: alive pid $($p.Id)" }
+          Get-Process | Where-Object { $_.Name -like '*Roblox*' } | ForEach-Object { "proc $($_.Name) $($_.Id) window='$($_.MainWindowTitle)'" }
+          $uri = "roblox-player:1+launchmode:play+gameinfo:" + ("0" * 32) + "+launchtime:1700000000000+placelauncherurl:https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3Frequest%3DRequestGame%26placeId%3D8304191830%26isPlayTogetherGame%3Dfalse+browsertrackerid:0+robloxLocale:en_us+gameLocale:en_us"
+          $q = Start-Process $exe -ArgumentList $uri -PassThru
+          Start-Sleep 40
+          if ($q.HasExited) { "ticket: exited code $($q.ExitCode)" } else { "ticket: alive pid $($q.Id)" }
+
+      - name: Crash report
+        shell: pwsh
+        run: |
+          $errors = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue
+          foreach ($e in $errors) { ($e.Message -replace "`r"," " -replace "`n"," ") }
+          $reports = Get-ChildItem 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AppCrash_Roblox*' } | Select-Object -Last 3
+          foreach ($r in $reports) {
+            "wer: $($r.Name)"
+            Get-Content (Join-Path $r.FullName 'Report.wer') -ErrorAction SilentlyContinue | Select-String 'AppName|AppPath|Sig\[[0-9]+\]\.Value|Sig\[[0-9]+\]\.Name'
+          }
+          $logs = Get-ChildItem "$env:LOCALAPPDATA\Roblox\logs" -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Player*' }
+          if ($logs) { $logs | ForEach-Object { "player log: $($_.Name) $($_.Length)" } } else { "no player log" }
